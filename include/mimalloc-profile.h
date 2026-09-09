@@ -26,7 +26,7 @@ typedef size_t (mi_cdecl mi_profiler_on_alloc_fun  )(mi_profiler_data_t* profile
 // Profiling callback invoked on each sampled in-place re-allocation.
 typedef size_t (mi_cdecl mi_profiler_on_realloc_inplace_fun)(mi_profiler_data_t* profiler_data, void* ptr, size_t old_size, const mi_heap_t* heap, void* profiler_arg);
 
-// Profiling callback invoked on a previously sampled allocation.
+// Profiling callback invoked when a previously sampled allocation is freed while the profiler is enabled.
 typedef void   (mi_cdecl mi_profiler_on_free_fun   )(mi_profiler_data_t* profiler_data, void* ptr, const mi_heap_t* heap, void* profiler_arg);
 
 // A profiler
@@ -51,6 +51,13 @@ mi_decl_export bool mi_heap_profile(mi_heap_t* heap, const mi_profiler_t* profil
 mi_decl_export bool mi_subproc_profile(mi_subproc_id_t subproc_id, const mi_profiler_t* profiler);
 mi_decl_export bool mi_profile(const mi_profiler_t* profiler);
 
+// Enable/disable profiling; both return the previous enabled state.
+// Start does not synchronously activate sampling on every thread.
+// Stop disables allocation and free notifications; missed frees are not replayed.
+// Neither call resets or flushes consumer state, waits for callbacks to finish,
+// or detaches the profiler.
+// Keep the descriptor (in writable storage), callbacks, and profiler_arg alive
+// while registered and while callbacks are in flight.
 mi_decl_export bool mi_profiler_start(const mi_profiler_t* profiler);
 mi_decl_export bool mi_profiler_stop(const mi_profiler_t* profiler);
 

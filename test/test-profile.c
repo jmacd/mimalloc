@@ -5,7 +5,7 @@ terms of the MIT license. A copy of the license can be found in the file
 "LICENSE" at the root of this distribution.
 -----------------------------------------------------------------------------*/
 
-// Tests for the mimalloc heap profiler (src/profile.c).
+// Tests for the mimalloc heap profiler (src/sample-profile.c).
 
 #include <assert.h>
 #include <stdbool.h>
@@ -61,7 +61,7 @@ static void mi_cdecl on_free(mi_profiler_data_t* data, void* ptr, const mi_heap_
 mi_profiler_t my_profiler = {
   NULL, NULL, NULL,  // reserved
   &g_state,          // profiler_arg
-  3*sizeof(void*),   // needed data size
+  sizeof(mi_profiler_data_t), // includes user_data[0]
   &on_alloc,       
   &on_free,
   NULL
