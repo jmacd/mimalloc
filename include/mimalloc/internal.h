@@ -350,7 +350,8 @@ mi_decl_restrict void* _mi_theap_malloc_sampled(mi_theap_t* theap, size_t req_si
 size_t        _mi_theap_update_sample_rate(mi_theap_t* theap);
 
 mi_decl_restrict void* _mi_theap_malloc_profiled(mi_theap_t* theap, size_t size, uint64_t requested_since_last_sample, bool zero, mi_page_t** ppage) mi_attr_noexcept;
-void          _mi_page_profile_free(mi_page_t* page, mi_block_t* block, void* p);
+bool          _mi_page_profile_free(mi_page_t* page, mi_block_t* block, void* p);
+void          _mi_page_profile_free_collect(mi_page_t* page, mi_block_t* block);
 size_t        _mi_theap_set_profile_sample_rate(mi_theap_t* theap, size_t sample_rate);
 
 
@@ -1223,6 +1224,9 @@ static inline bool mi_theap_should_sample(mi_theap_t* theap, size_t req_size) {
 #define MI_BLOCK_TAG_PROFILED  ((mi_encoded_t)(1))
 #define MI_BLOCK_TAG_GUARDED   (~MI_BLOCK_TAG_ALIGNED)
 
+// In a decoded remote-free link, this bit describes the current block, not its successor.
+#define MI_BLOCK_PROFILE_PENDING  ((uintptr_t)2)
+
 
 static inline bool mi_block_ptr_is_guarded(const mi_block_t* block, const void* p) {
 #if MI_GUARDED
@@ -1375,6 +1379,37 @@ static inline void mi_block_set_next(const mi_page_t* page, mi_block_t* block, c
   MI_UNUSED(page);
   mi_block_set_nextx(page,block,next,NULL);
   #endif
+}
+
+static inline mi_block_t* mi_block_next_mt(const mi_page_t* page, const mi_block_t* block, bool* is_profiled) {
+  #if MI_PROFILE
+  #if MI_ENCODE_FREELIST
+  mi_block_t* next = mi_block_nextx(page,block,page->keys);
+  #else
+  mi_block_t* next = mi_block_nextx(page,block,NULL);
+  #endif
+  *is_profiled = (((uintptr_t)next & MI_BLOCK_PROFILE_PENDING) != 0);
+  next = (mi_block_t*)((uintptr_t)next & ~MI_BLOCK_PROFILE_PENDING);
+  #if MI_ENCODE_FREELIST
+  if mi_unlikely(next!=NULL && !mi_page_contains_address(page,next)) {
+    return _mi_block_next_is_corrupted(page,block,next);
+  }
+  #endif
+  return next;
+  #else
+  *is_profiled = false;
+  return mi_block_next(page,block);
+  #endif
+}
+
+static inline void mi_block_set_next_mt(const mi_page_t* page, mi_block_t* block, const mi_block_t* next, bool is_profiled) {
+  #if MI_PROFILE
+  mi_assert_internal(((uintptr_t)next & MI_BLOCK_PROFILE_PENDING) == 0);
+  next = (const mi_block_t*)((uintptr_t)next | (is_profiled ? MI_BLOCK_PROFILE_PENDING : 0));
+  #else
+  MI_UNUSED(is_profiled);
+  #endif
+  mi_block_set_next(page,block,next);
 }
 
 

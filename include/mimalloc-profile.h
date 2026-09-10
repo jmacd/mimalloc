@@ -12,9 +12,9 @@ terms of the MIT license. A copy of the license can be found in the file
 #include <stdbool.h>  // bool
 #include <stdint.h>   // uint64_t
 
-// Profiler data is stored together with each sampled allocation (unless the `on_free` field in the profiler is NULL.)
+// Profiler data is stored together with each sampled allocation.
 typedef struct mi_profiler_data_s {
-  size_t profiler_data_size;  // size of the custom profile data (should be the `mi_profiler_t.profiler_data_size`)
+  size_t profiler_data_size;  // actual size of this data, including the fields below
   size_t usable_size;         // usable size in the allocated block
   size_t requested_size;      // user requested size (i.e. the size passed to `mi_malloc`)
   void*  user_data[1];        // default, but can be less or more (up to 1KiB), depending on `profiler_data_size`
@@ -29,6 +29,14 @@ typedef size_t (mi_cdecl mi_profiler_on_realloc_inplace_fun)(mi_profiler_data_t*
 // Profiling callback invoked when a previously sampled allocation is freed while the profiler is enabled.
 typedef void   (mi_cdecl mi_profiler_on_free_fun   )(mi_profiler_data_t* profiler_data, void* ptr, const mi_heap_t* heap, void* profiler_arg);
 
+// Optional notification before a freed sampled block becomes reusable.
+// Remote frees are delivered during native free-list collection, possibly on a different thread.
+// Data is borrowed for this call only. Do not allocate, free, or reenter mimalloc here:
+// collection can run under allocator locks. Retain origin identity in user_data, not thread locals.
+// Keep the heap and registration unchanged until samples and pending frees drain.
+// If both free callbacks are set, on_free runs first and must preserve data needed here.
+typedef void (mi_cdecl mi_profiler_on_free_collect_fun)(mi_profiler_data_t* profiler_data, const mi_heap_t* heap, void* profiler_arg);
+
 // A profiler
 // All fields are considered immutable such that they can be copied and accessed concurrently. All fields can be NULL/0.
 typedef struct mi_profiler_s {
@@ -40,6 +48,7 @@ typedef struct mi_profiler_s {
   mi_profiler_on_alloc_fun*   on_alloc;           // called on a sampled allocation (may be called concurrently)  
   mi_profiler_on_free_fun*    on_free;            // called on when previous sampled allocation is freed (may be called concurrently)
   mi_profiler_on_realloc_inplace_fun* on_realloc_inplace;  // called on in-place reallocation of a previous sampled allocation (may be called concurrently)
+  mi_profiler_on_free_collect_fun* on_free_collect; // optional, in addition to on_free; registration must remain valid until collection
 } mi_profiler_t;
 
 // Exported definitions
@@ -54,6 +63,7 @@ mi_decl_export bool mi_profile(const mi_profiler_t* profiler);
 // Enable/disable profiling; both return the previous enabled state.
 // Start does not synchronously activate sampling on every thread.
 // Stop disables allocation and free notifications; missed frees are not replayed.
+// This includes on_free_collect notifications still pending in native free lists.
 // Neither call resets or flushes consumer state, waits for callbacks to finish,
 // or detaches the profiler.
 // Keep the descriptor (in writable storage), callbacks, and profiler_arg alive

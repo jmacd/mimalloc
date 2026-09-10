@@ -142,6 +142,7 @@ mi_decl_noinline mi_decl_restrict void* _mi_theap_malloc_profiled(mi_theap_t* th
   const size_t usable_size = _mi_page_usable_size(page,block) - profiler_user_offset;
   void* const p = (uint8_t*)block + profiler_user_offset;
   mi_profiler_data_t* profiler_data = (mi_profiler_data_t*)((uint8_t*)block + profiler_data_offset);
+  profiler_data->profiler_data_size = profiler_data_size;
   profiler_data->requested_size = size - MI_PADDING_SIZE;
   profiler_data->usable_size = usable_size;
 
@@ -156,19 +157,43 @@ mi_decl_noinline mi_decl_restrict void* _mi_theap_malloc_profiled(mi_theap_t* th
   return p;
 }
 
-void _mi_page_profile_free(mi_page_t* page, mi_block_t* block, void* p) {
+// Notify immediately, and return whether native collection must retain the data.
+bool _mi_page_profile_free(mi_page_t* page, mi_block_t* block, void* p) {
   mi_assert_internal(mi_block_ptr_is_sampled(block,p));
 
   // get the heap and profiler
   mi_heap_t* const heap = mi_page_heap(page);
-  if (heap==NULL) return;
+  if (heap==NULL) return false;
   mi_profiler_t* prof = mi_heap_profiler(heap);
-  if (prof==NULL || !mi_profiler_is_enabled(prof) || prof->on_free==NULL) return;
+  if (prof==NULL || !mi_profiler_is_enabled(prof)) return false;
   
   // call the on_free callback
   mi_profiler_data_t* const profiler_data = (mi_profiler_data_t*)((uint8_t*)block + sizeof(mi_block_t));
-  prof->on_free(profiler_data, p, heap, prof->profiler_arg);
+  if (prof->on_free!=NULL) {
+    prof->on_free(profiler_data, p, heap, prof->profiler_arg);
+  }
+  return (prof->on_free_collect!=NULL);
 }
+
+#if MI_PROFILE
+void _mi_page_profile_free_collect(mi_page_t* page, mi_block_t* block) {
+  mi_profiler_data_t* data = (mi_profiler_data_t*)((uint8_t*)block + sizeof(mi_block_t));
+  mi_track_mem_defined(data,sizeof(size_t));
+  const size_t data_size = data->profiler_data_size;
+  mi_assert_internal(data_size >= 3*sizeof(size_t) && data_size <= 1024);
+  MI_UNUSED(data_size);
+  mi_track_mem_defined(data,data_size);
+  mi_heap_t* const heap = mi_page_heap(page);
+  mi_profiler_t* const prof = (heap==NULL ? NULL : mi_heap_profiler(heap));
+  if (prof!=NULL && mi_profiler_is_enabled(prof) && prof->on_free_collect!=NULL) {
+    prof->on_free_collect(data, heap, prof->profiler_arg);
+  }
+  #if (MI_DEBUG>0) && !MI_TRACK_ENABLED && !MI_TSAN
+  _mi_memset(data,MI_DEBUG_FREED,data_size);
+  #endif
+  mi_track_mem_noaccess(data,data_size);
+}
+#endif
 
 
 //----------------------------------------------------------------------------

@@ -25,12 +25,18 @@ static size_t mi_page_usable_size_of(const mi_page_t* page, const mi_block_t* bl
 
 // regular free of a (thread local) block pointer
 // fast path written carefully to prevent spilling on the stack
-static inline void mi_free_block_local(mi_page_t* page, mi_block_t* block, bool was_guarded, bool check_full)
+static inline void mi_free_block_local(mi_page_t* page, mi_block_t* block, bool was_guarded, bool check_full, bool is_profiled)
 {
   // checks  
   size_t usable_size;
   if mi_unlikely(!mi_check_padding_on_free(page, block, was_guarded, &usable_size)) return; 
   if mi_unlikely(!mi_check_double_free(page,block)) return;  // usually checked with padding
+
+  #if MI_PROFILE
+  if (is_profiled) { _mi_page_profile_free_collect(page,block); }
+  #else
+  MI_UNUSED(is_profiled);
+  #endif
 
   // mi_stat_free(page, block);    
   mi_track_free_size(block, usable_size); 
@@ -61,7 +67,7 @@ static inline void mi_free_block_local(mi_page_t* page, mi_block_t* block, bool 
 static void mi_decl_noinline mi_free_try_collect_mt(mi_page_t* page, mi_block_t* mt_free, bool allow_reclaim) mi_attr_noexcept;
 
 // Free a block multi-threaded
-static inline void mi_free_block_mt(mi_page_t* page, mi_block_t* block, bool was_guarded, bool allow_reclaim) mi_attr_noexcept
+static inline void mi_free_block_mt(mi_page_t* page, mi_block_t* block, bool was_guarded, bool allow_reclaim, bool is_profiled) mi_attr_noexcept
 {
   size_t usable_size;
   if mi_unlikely(!mi_check_padding_on_free(page, block, was_guarded, &usable_size)) return;    // checking padding is safe for mt
@@ -74,7 +80,18 @@ static inline void mi_free_block_mt(mi_page_t* page, mi_block_t* block, bool was
   #if (MI_DEBUG>0) && !MI_TRACK_ENABLED  && !MI_TSAN       // note: when tracking, cannot use mi_usable_size with multi-threading
   if (!was_guarded) {
     const size_t dbgsize = (usable_size > MI_MiB ? MI_MiB : usable_size);
-    _mi_memset_aligned(block, MI_DEBUG_FREED, dbgsize);
+    #if MI_PROFILE
+    if (is_profiled) {
+      const mi_profiler_data_t* data = (const mi_profiler_data_t*)((uint8_t*)block + sizeof(mi_block_t));
+      const size_t preserve = sizeof(mi_block_t) + data->profiler_data_size;
+      mi_assert_internal(preserve <= dbgsize);
+      _mi_memset((uint8_t*)block + preserve, MI_DEBUG_FREED, dbgsize - preserve);
+    }
+    else
+    #endif
+    {
+      _mi_memset_aligned(block, MI_DEBUG_FREED, dbgsize);
+    }
   }
   #endif
 
@@ -82,7 +99,7 @@ static inline void mi_free_block_mt(mi_page_t* page, mi_block_t* block, bool was
   mi_thread_free_t tf_new;
   mi_thread_free_t tf_old = mi_atomic_load_relaxed(&page->xthread_free);
   do {
-    mi_block_set_next(page, block, mi_tf_block(tf_old));    
+    mi_block_set_next_mt(page, block, mi_tf_block(tf_old), is_profiled);
     tf_new = mi_tf_create(block, true /* try to own it */ );
   } while (!mi_atomic_cas_weak_acq_rel(&page->xthread_free, &tf_old, tf_new)); // todo: release is enough?
 
@@ -122,8 +139,9 @@ static inline mi_block_t* mi_validate_block_from_ptr( const mi_page_t* page, con
   #endif
 }
 
-static inline mi_block_t* mi_page_ptr_block_check(mi_page_t* page, void* p, bool* was_guarded) mi_attr_noexcept {
+static inline mi_block_t* mi_page_ptr_block_check(mi_page_t* page, void* p, bool* was_guarded, bool* is_profiled) mi_attr_noexcept {
   MI_UNUSED(was_guarded);
+  MI_UNUSED(is_profiled);
   if mi_likely(!mi_page_has_interior_pointers(page)) {
     return mi_validate_block_from_ptr(page,p);
   }
@@ -134,7 +152,7 @@ static inline mi_block_t* mi_page_ptr_block_check(mi_page_t* page, void* p, bool
     if (offset >= sizeof(mi_block_t)) {
       #if MI_PROFILE
       if (block->next == MI_BLOCK_TAG_PROFILED) {
-        _mi_page_profile_free(page,block,p); 
+        *is_profiled = _mi_page_profile_free(page,block,p);
       }
       else 
       #endif
@@ -152,26 +170,42 @@ static inline mi_block_t* mi_page_ptr_block_check(mi_page_t* page, void* p, bool
   }
 }
 
+// Keep the pending-bit path out of ordinary frees.
+#if MI_PROFILE
+static mi_decl_noinline void mi_free_block_profiled(mi_page_t* page, mi_block_t* block, bool is_local, bool allow_reclaim) mi_attr_noexcept {
+  if (is_local) mi_free_block_local(page,block,false,true,true);
+          else mi_free_block_mt(page,block,false,allow_reclaim,true);
+}
+#endif
+
 // free a local pointer  (page parameter comes first for better codegen)
 static void mi_decl_noinline mi_free_generic_local(mi_page_t* page, void* p) mi_attr_noexcept {
   mi_assert_internal(p!=NULL && page != NULL);
   bool was_guarded = false;
-  mi_block_t* block = mi_page_ptr_block_check(page,p,&was_guarded);  
+  bool is_profiled = false;
+  mi_block_t* block = mi_page_ptr_block_check(page,p,&was_guarded,&is_profiled);
   // mi_block_t* const block = (mi_page_has_interior_pointers(page) ? _mi_page_ptr_unalign(page, p) : mi_validate_block_from_ptr(page,p));
   // mi_block_check_profiled(page,block,p);
   // const bool was_guarded = mi_block_check_unguard(page, block, p);
-  mi_free_block_local(page, block, was_guarded, true /* check for a full page */);
+  #if MI_PROFILE
+  if mi_unlikely(is_profiled) { mi_free_block_profiled(page,block,true,true); return; }
+  #endif
+  mi_free_block_local(page, block, was_guarded, true /* check for a full page */, false);
 }
 
 // free a pointer owned by another thread (page parameter comes first for better codegen)
 static void mi_decl_noinline mi_free_generic_mt(mi_page_t* page, void* p, bool allow_reclaim) mi_attr_noexcept {
   mi_assert_internal(p!=NULL && page != NULL);
   bool was_guarded = false;
-  mi_block_t* block = mi_page_ptr_block_check(page,p,&was_guarded);
+  bool is_profiled = false;
+  mi_block_t* block = mi_page_ptr_block_check(page,p,&was_guarded,&is_profiled);
   // mi_block_t* const block = (mi_page_has_interior_pointers(page) ? _mi_page_ptr_unalign(page, p) : mi_validate_block_from_ptr(page,p));
   // mi_block_check_profiled(page,block,p);
   // const bool was_guarded = mi_block_check_unguard(page, block, p);
-  mi_free_block_mt(page, block, was_guarded, allow_reclaim);
+  #if MI_PROFILE
+  if mi_unlikely(is_profiled) { mi_free_block_profiled(page,block,false,allow_reclaim); return; }
+  #endif
+  mi_free_block_mt(page, block, was_guarded, allow_reclaim, false);
 }
 
 // generic free (for runtime integration)
@@ -262,7 +296,7 @@ static mi_decl_forceinline void mi_free_nonnull(void* p, mi_page_t* page, size_t
   if mi_likely(xtid == 0) {                        // `tid == mi_page_thread_id(page) && mi_page_flags(page) == 0`
     // thread-local, aligned, and not a full page
     mi_block_t* const block = mi_validate_block_from_ptr(page,p);
-    mi_free_block_local(page, block, false /* was guarded */, false /* no need to check if the page is full */);
+    mi_free_block_local(page, block, false /* was guarded */, false /* no need to check if the page is full */, false);
   }
   else if (xtid <= MI_PAGE_FLAG_MASK) {            // `tid == mi_page_thread_id(page) && mi_page_flags(page) != 0`
     // page is local, but is full or contains (inner) aligned blocks; use generic path
@@ -272,7 +306,7 @@ static mi_decl_forceinline void mi_free_nonnull(void* p, mi_page_t* page, size_t
   else if ((xtid & MI_PAGE_FLAG_MASK) == 0) {      // `tid != mi_page_thread_id(page) && mi_page_flags(page) == 0`
     // blocks are aligned (and not a full page); push on the thread_free list
     mi_block_t* const block = mi_validate_block_from_ptr(page,p);
-    mi_free_block_mt(page,block,false /* was_guarded */, allow_reclaim);
+    mi_free_block_mt(page,block,false /* was_guarded */, allow_reclaim, false);
   }
   else {
     // page is full or contains (inner) aligned blocks; use generic multi-thread path
@@ -585,12 +619,13 @@ mi_decl_nodiscard size_t mi_usable_size(const void* p) mi_attr_noexcept {
 
 #if MI_SECURE>=3 && !MI_PADDING   
 // linear check if the free list contains a specific element
-static bool mi_list_contains(const mi_page_t* page, const mi_block_t* list, const mi_block_t* elem, const char* list_kind) {
+static bool mi_list_contains(const mi_page_t* page, const mi_block_t* list, const mi_block_t* elem, const char* list_kind, bool is_mt) {
   const size_t max_count = page->capacity;      // can never hold more blocks than the capacity
   size_t count = 0;
   while (list != NULL && count <= max_count) {  // double-free can create cycles so we limit the number of iterations
     if (elem==list) return true;
-    list = mi_block_next(page, list);
+    bool is_profiled;
+    list = (is_mt ? mi_block_next_mt(page,list,&is_profiled) : mi_block_next(page,list));
     count++;    
   }
   if mi_unlikely(count > max_count) {
@@ -602,9 +637,9 @@ static bool mi_list_contains(const mi_page_t* page, const mi_block_t* list, cons
 static mi_decl_noinline bool mi_check_double_freex(const mi_page_t* page, const mi_block_t* block) {
   // The decoded value is in the same page (or NULL).
   // Walk the free lists to verify positively if it is already freed
-  if (mi_list_contains(page, page->free, block, "free") ||
-      mi_list_contains(page, page->local_free, block, "local free") ||
-      mi_list_contains(page, mi_page_thread_free(page), block, "thread free"))
+  if (mi_list_contains(page, page->free, block, "free", false) ||
+      mi_list_contains(page, page->local_free, block, "local free", false) ||
+      mi_list_contains(page, mi_page_thread_free(page), block, "thread free", true))
   {
     _mi_error_message(EAGAIN, "double free detected of block %p with size %zu\n", block, mi_page_block_size(page));
     return false;
@@ -615,6 +650,9 @@ static mi_decl_noinline bool mi_check_double_freex(const mi_page_t* page, const 
 // Used for double free checking to avoid checking free lists too frequently
 static inline bool mi_block_could_be_double_free(const mi_page_t* page, const mi_block_t* block) {
   mi_block_t* n = mi_block_nextx(page,block,page->keys);
+  #if MI_PROFILE
+  n = (mi_block_t*)((uintptr_t)n & ~MI_BLOCK_PROFILE_PENDING);
+  #endif
   return (((uintptr_t)n & (MI_INTPTR_SIZE-1))==0 &&       // quick check: aligned pointer?
           (n==NULL || mi_page_contains_address(page,n))); // quick check: in the same page or NULL?  
 }
@@ -809,5 +847,3 @@ void mi_stat_free(const mi_page_t* page, const mi_block_t* block) {
   MI_UNUSED(page); MI_UNUSED(block);
 }
 #endif
-
-

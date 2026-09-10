@@ -61,14 +61,15 @@ static inline uint8_t* mi_page_area(const mi_page_t* page) {
 }
 */
 
-static bool mi_page_list_is_valid(mi_page_t* page, mi_block_t* p) {
+static bool mi_page_list_is_valid(mi_page_t* page, mi_block_t* p, bool is_mt) {
   size_t psize;
   uint8_t* page_area = mi_page_area(page, &psize);
   mi_block_t* start = (mi_block_t*)page_area;
   mi_block_t* end   = (mi_block_t*)(page_area + psize);
   while(p != NULL) {
     if (p < start || p >= end) return false;
-    p = mi_block_next(page, p);
+    bool is_profiled;
+    p = (is_mt ? mi_block_next_mt(page,p,&is_profiled) : mi_block_next(page,p));
   }
 #if MI_DEBUG>3 // generally too expensive to check this
   if (page->free_is_zero) {
@@ -94,8 +95,8 @@ static bool mi_page_is_valid_init(mi_page_t* page) {
   // uint8_t* start = mi_page_start(page);
   //mi_assert_internal(start + page->capacity*page->block_size == page->top);
 
-  mi_assert_internal(mi_page_list_is_valid(page,page->free));
-  mi_assert_internal(mi_page_list_is_valid(page,page->local_free));
+  mi_assert_internal(mi_page_list_is_valid(page,page->free,false));
+  mi_assert_internal(mi_page_list_is_valid(page,page->local_free,false));
 
   #if MI_DEBUG>3 // generally too expensive to check this
   if (page->free_is_zero) {
@@ -108,7 +109,7 @@ static bool mi_page_is_valid_init(mi_page_t* page) {
 
   #if !MI_TRACK_ENABLED && !MI_TSAN
   mi_block_t* tfree = mi_page_thread_free(page);
-  mi_assert_internal(mi_page_list_is_valid(page, tfree));
+  mi_assert_internal(mi_page_list_is_valid(page, tfree, true));
   //size_t tfree_count = mi_page_list_count(page, tfree);
   //mi_assert_internal(tfree_count <= page->thread_freed + 1);
   #endif
@@ -326,10 +327,14 @@ static void mi_page_thread_collect_to_local(mi_page_t* page, mi_block_t* head)
   size_t count = 1;
   mi_block_t* last = head;
   mi_block_t* next;
-  while ((next = mi_block_next(page, last)) != NULL && count <= max_count) {
+  bool is_profiled = false;
+  bool has_profiled = false;
+  while ((next = mi_block_next_mt(page, last, &is_profiled)) != NULL && count <= max_count) {
+    has_profiled |= is_profiled;
     count++;
     last = next;
   }
+  has_profiled |= is_profiled;
 
   // if `count > max_count` there was a memory corruption (possibly infinite list due to double multi-threaded free)
   if mi_unlikely(count > max_count) {
@@ -341,6 +346,21 @@ static void mi_page_thread_collect_to_local(mi_page_t* page, mi_block_t* head)
     _mi_error_message(EFAULT, "corrupted meta-data in thread-free list\n");
     return; // the thread-free items cannot be freed
   }
+
+  // Validate the batch before notifying consumers or changing any links.
+  #if MI_PROFILE
+  if mi_unlikely(has_profiled) {
+    for (mi_block_t* block = head; block != NULL; block = next) {
+      next = mi_block_next_mt(page,block,&is_profiled);
+      if (is_profiled) {
+        _mi_page_profile_free_collect(page,block);
+        mi_block_set_next(page,block,next);
+      }
+    }
+  }
+  #else
+  MI_UNUSED(has_profiled);
+  #endif
 
   // and append the current local free list
   mi_block_set_next(page, last, page->local_free);
@@ -423,9 +443,10 @@ void _mi_page_free_collect(mi_page_t* page, bool force) {
 // the last remaining element, it will be collected and the used count will become `0` (so `mi_page_all_free` becomes true).
 mi_block_t* _mi_page_free_collect_partly(mi_page_t* page, mi_block_t* head) {
   if (head == NULL) return NULL;
-  mi_block_t* next = mi_block_next(page,head);  // we cannot collect the head element itself as `page->thread_free` may point to it (and we want to avoid atomic ops)
+  bool is_profiled = false;
+  mi_block_t* next = mi_block_next_mt(page,head,&is_profiled);  // the head stays published; only collect its tail
   if (next != NULL) {
-    mi_block_set_next(page, head, NULL);
+    mi_block_set_next_mt(page, head, NULL, is_profiled);
     mi_page_thread_collect_to_local(page, next);
     if (page->local_free != NULL && page->free == NULL) {
       page->free = page->local_free;
@@ -437,7 +458,7 @@ mi_block_t* _mi_page_free_collect_partly(mi_page_t* page, mi_block_t* head) {
   if (mi_page_used(page) == 1) {
     // all elements are free'd since we skipped the `head` element itself
     mi_assert_internal(mi_tf_block(mi_atomic_load_relaxed(&page->xthread_free)) == head);
-    mi_assert_internal(mi_block_next(page,head) == NULL);
+    mi_assert_internal(mi_block_next_mt(page,head,&is_profiled) == NULL);
     _mi_page_free_collect(page, false);  // collect the final element
     return NULL;
   }
