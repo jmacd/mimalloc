@@ -486,6 +486,35 @@ int main(void) {
   // Heaps
   // ---------------------------------------------------
 
+  CHECK_BODY("heap-zalloc-cold") {
+    mi_heap_t* heap = mi_heap_new();
+    mi_heap_t* other = mi_heap_new();
+    if (heap == NULL || other == NULL) { result = false; }
+    else {
+      for (int small = 0; small < 2; small++) {
+        void* anchor = mi_heap_malloc(heap, 32);
+        void* p = mi_heap_malloc(heap, 32);
+        if (p == NULL || anchor == NULL) {
+          mi_free(p); mi_free(anchor);
+          result = false;
+          break;
+        }
+        memset(p, 0x5A, 32);
+        mi_free(p);
+        mi_heap_collect(heap, true);
+        // Switch the cached heap so both zeroing APIs take their cold path.
+        void* q = mi_heap_malloc(other, 32);
+        result = (q != NULL) && result;
+        mi_free(q);
+        p = (small ? mi_heap_zalloc_small(heap, 32) : mi_heap_zalloc(heap, 32));
+        result = mem_is_zero(p, 32) && result;
+        mi_free(p);
+        mi_free(anchor);
+      }
+    }
+    mi_heap_delete(other);
+    mi_heap_delete(heap);
+  };
   CHECK_BODY("heap-os1") {
     // @zoxc opus bug #2.
     mi_heap_t* h = mi_heap_new();
@@ -723,6 +752,5 @@ static bool test_zero_aligned_first(void) {
   mi_free(p);
   return res;
 }
-
 
 
