@@ -29,6 +29,8 @@ set_property(CACHE MI_TRACK PROPERTY STRINGS "OFF" "ASAN" "VALGRIND" "ETW")
 set(MI_STATS "DEFAULT" CACHE STRING "Enable statistics.")
 set_property(CACHE MI_STATS PROPERTY STRINGS "OFF" "ON" "FULL" "DEFAULT")
 
+option(MI_THREAD_STATS "Track exact calling-thread block-byte activity (adds allocation/free work)" OFF)
+
 set(MI_PROFILE "DEFAULT" CACHE STRING "Enable profiling.")
 set_property(CACHE MI_PROFILE PROPERTY STRINGS "OFF" "ON" "FULL" "DEFAULT")
 
@@ -513,6 +515,11 @@ else()
   list(APPEND mi_defines MI_STATS=0)
 endif()
 
+if(MI_THREAD_STATS)
+  message(STATUS "Enable exact calling-thread block-byte activity (MI_THREAD_STATS=ON)")
+  list(APPEND mi_defines MI_THREAD_STATS=1)
+endif()
+
 if(MI_PROFILE STREQUAL "DEFAULT")
   if(MI_DEBUG)
     set(MI_PROFILE "FULL")
@@ -882,7 +889,7 @@ endif()
 # set language for source files now
 if(MI_USE_CXX)
   set_source_files_properties(${mi_sources} PROPERTIES LANGUAGE CXX )
-  set_source_files_properties(src/static.c test/test-api.c test/test-api-fill.c test/test-stress.c test/test-stress-heaps.c  test/test-stress-subprocs.c test/test-profile.c PROPERTIES LANGUAGE CXX )
+  set_source_files_properties(src/static.c test/test-api.c test/test-api-fill.c test/test-stress.c test/test-stress-heaps.c  test/test-stress-subprocs.c test/test-profile.c test/test-activity.c PROPERTIES LANGUAGE CXX )
 endif()
 
 
@@ -1099,7 +1106,7 @@ if (MI_BUILD_TESTS)
   enable_testing()
 
   # static link tests
-  foreach(TEST_NAME api api-fill stress-heaps stress-subprocs stress profile)
+  foreach(TEST_NAME api api-fill stress-heaps stress-subprocs stress profile activity)
     add_executable(mimalloc-test-${TEST_NAME} test/test-${TEST_NAME}.c)
     target_compile_definitions(mimalloc-test-${TEST_NAME} PRIVATE ${mi_defines})
     target_compile_options(mimalloc-test-${TEST_NAME} PRIVATE ${mi_cflags})

@@ -169,6 +169,23 @@ mi_decl_export size_t  mi_stats_get_bin_size(size_t bin) mi_attr_noexcept;
 // get theap stats (only thread safe on theaps belonging to the calling thread)
 mi_decl_export bool    mi_theap_stats_get(mi_theap_t* theap, mi_stats_t* stats) mi_attr_noexcept;
 
+// Exact calling-thread activity when built with MI_THREAD_STATS=ON.
+// Counts full native block bytes (including rounding, padding, and in-block metadata),
+// not requested bytes or live consumption. Native internal block operations are included.
+// Counts begin at thread initialization; call mi_thread_init before measured work, including on free-only threads.
+// Counts are since initialization or explicit get_and_reset; ordinary stats merges/resets do not clear them.
+// Getter is owner-thread-only, does not initialize the thread or collect, and requires both outputs.
+// Returns 0 on success, ENOSYS when not compiled in, EAGAIN before thread initialization,
+// EOVERFLOW when either counter saturates at UINT64_MAX, or EINVAL for null outputs.
+// On failure outputs are unchanged. The getter does not set errno or invoke error callbacks.
+mi_decl_export int     mi_thread_activity_get(uint64_t* allocated_bytes, uint64_t* freed_bytes) mi_attr_noexcept;
+
+// Owner-thread-only consumption of the current interval, for one collecting owner.
+// Same results as get; on success both counters are reset. EOVERFLOW also resets both
+// counters to recover, but leaves outputs unchanged. Other errors do not reset anything.
+// Subsequent get calls observe the new interval, not a lifetime cumulative total.
+mi_decl_export int     mi_thread_activity_get_and_reset(uint64_t* allocated_bytes, uint64_t* freed_bytes) mi_attr_noexcept;
+
 // add the theap stats to the stats of the parent heap and clear the theap stats
 mi_decl_export void    mi_theap_stats_merge_to_heap(mi_theap_t* theap) mi_attr_noexcept;
 

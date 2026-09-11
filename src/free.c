@@ -32,6 +32,10 @@ static inline void mi_free_block_local(mi_page_t* page, mi_block_t* block, bool 
   if mi_unlikely(!mi_check_padding_on_free(page, block, was_guarded, &usable_size)) return; 
   if mi_unlikely(!mi_check_double_free(page,block)) return;  // usually checked with padding
 
+  #if MI_THREAD_STATS
+  mi_thread_activity_add(mi_thread_activity_tld(), false, mi_page_block_size(page));
+  #endif
+
   #if MI_PROFILE
   if (is_profiled) { _mi_page_profile_free_collect(page,block); }
   #else
@@ -71,6 +75,10 @@ static inline void mi_free_block_mt(mi_page_t* page, mi_block_t* block, bool was
 {
   size_t usable_size;
   if mi_unlikely(!mi_check_padding_on_free(page, block, was_guarded, &usable_size)) return;    // checking padding is safe for mt
+
+  #if MI_THREAD_STATS
+  mi_thread_activity_add(mi_thread_activity_tld(), false, mi_page_block_size(page));
+  #endif
   
   // adjust stats (after padding check )
   // mi_stat_free(page, block);    // stat_free may access the padding

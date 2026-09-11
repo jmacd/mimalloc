@@ -118,7 +118,10 @@ static mi_decl_cache_align mi_tld_t mi_tld_detached = {
   MI_LOCK_INITIALIZER,    // theaps lock
   false,                  // recurse
   false,                  // is_in_threadpool
-  MI_MEMID_STATIC         // memid
+  MI_MEMID_STATIC,        // memid
+  #if MI_THREAD_STATS
+  0, 0                    // activity
+  #endif
 };
 
 mi_decl_hidden mi_decl_cache_align const mi_theap_t _mi_theap_empty = {
@@ -240,6 +243,10 @@ mi_heap_t* _mi_subproc_heap_main(mi_subproc_t* subproc) {
 ----------------------------------------------------------- */
 
 static mi_tld_t* mi_tld_init(mi_tld_t* tld, size_t tseq, mi_subproc_t* subproc) {
+  #if MI_THREAD_STATS
+  tld->activity_allocated = 0;
+  tld->activity_freed = 0;
+  #endif
   tld->subproc = subproc;
   tld->theaps = NULL;
   mi_lock_init(&tld->theaps_lock);

@@ -17,6 +17,20 @@ terms of the MIT license. A copy of the license can be found in the file
 #include <string.h>      // memset, strlen (for mi_strdup)
 #include <stdlib.h>      // malloc, abort
 
+#if MI_THREAD_STATS
+static inline mi_tld_t* mi_thread_activity_tld(void) {
+  mi_theap_t* theap = _mi_theap_default();
+  return (mi_theap_is_initialized(theap) && !theap->is_detached ? theap->tld : NULL);
+}
+
+static inline void mi_thread_activity_add(mi_tld_t* tld, bool allocated, size_t size) {
+  if (tld == NULL) return;
+  uint64_t* counter = (allocated ? &tld->activity_allocated : &tld->activity_freed);
+  const uint64_t total = *counter + (uint64_t)size;
+  *counter = (total < *counter ? UINT64_MAX : total);
+}
+#endif
+
 #define MI_IN_ALLOC_C
 #include "alloc-override.c"
 #include "free.c"
@@ -82,6 +96,10 @@ static mi_decl_forceinline void* mi_page_malloc_zero(mi_theap_t* theap, mi_page_
 
   page->free = next;
   page->xused = xused;
+  #if MI_THREAD_STATS
+  mi_thread_activity_add(theap->is_detached ? mi_thread_activity_tld() : theap->tld,
+                         true, mi_page_block_size(page));
+  #endif
   mi_assert_internal(page->free == NULL || _mi_ptr_page(page->free) == page);
   mi_assert_internal(page->block_size < MI_MAX_ALIGN_SIZE || _mi_is_aligned(block, MI_MAX_ALIGN_SIZE));
 

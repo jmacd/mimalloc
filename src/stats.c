@@ -636,6 +636,38 @@ bool mi_theap_stats_get(mi_theap_t* theap, mi_stats_t* stats) mi_attr_noexcept {
   return mi_stats_copy(stats, mi_theap_get_stats(theap));
 }
 
+static int mi_thread_activity_read(uint64_t* allocated_bytes, uint64_t* freed_bytes, bool reset) mi_attr_noexcept {
+  if (allocated_bytes == NULL || freed_bytes == NULL) return EINVAL;
+  #if MI_THREAD_STATS
+  mi_theap_t* theap = _mi_theap_default();
+  if (!mi_theap_is_initialized(theap) || theap->is_detached || theap->tld == NULL) return EAGAIN;
+  mi_tld_t* tld = theap->tld;
+  const uint64_t allocated = tld->activity_allocated;
+  const uint64_t freed = tld->activity_freed;
+  if (reset) {
+    tld->activity_allocated = 0;
+    tld->activity_freed = 0;
+  }
+  if (allocated == UINT64_MAX || freed == UINT64_MAX) {
+    return EOVERFLOW;
+  }
+  *allocated_bytes = allocated;
+  *freed_bytes = freed;
+  return 0;
+  #else
+  MI_UNUSED(reset);
+  return ENOSYS;
+  #endif
+}
+
+int mi_thread_activity_get(uint64_t* allocated_bytes, uint64_t* freed_bytes) mi_attr_noexcept {
+  return mi_thread_activity_read(allocated_bytes, freed_bytes, false);
+}
+
+int mi_thread_activity_get_and_reset(uint64_t* allocated_bytes, uint64_t* freed_bytes) mi_attr_noexcept {
+  return mi_thread_activity_read(allocated_bytes, freed_bytes, true);
+}
+
 void mi_theap_stats_merge_to_heap(mi_theap_t* theap) mi_attr_noexcept {
   if (theap == NULL) return;
   _mi_theap_merge_stats(theap);

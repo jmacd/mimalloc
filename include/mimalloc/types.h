@@ -92,6 +92,11 @@ terms of the MIT license. A copy of the license can be found in the file
 #endif
 #endif
 
+// Exact caller-thread activity is optional; unlike page statistics it updates on every block operation.
+#ifndef MI_THREAD_STATS
+#define MI_THREAD_STATS 0
+#endif
+
 // Enable profiling support (0=off, 1=fast, can be enabled always, 2=allow fine-grained sample rates(<64 KiB), a tad more expensive)
 #ifndef MI_PROFILE
 #define MI_PROFILE  1
@@ -755,6 +760,10 @@ struct mi_tld_s {
   bool                  recurse;              // true if deferred was called; used to prevent infinite recursion.
   bool                  is_in_threadpool;     // true if this thread is part of a threadpool (and can run arbitrary tasks)
   mi_memid_t            memid;                // provenance of the tld memory itself (meta or OS)
+  #if MI_THREAD_STATS
+  uint64_t             activity_allocated;   // cumulative native block bytes; not merged with heap stats
+  uint64_t             activity_freed;       // credited to the freeing thread, not the allocation origin
+  #endif
 };
 
 
